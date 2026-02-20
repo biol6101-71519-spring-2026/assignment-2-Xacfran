@@ -1,0 +1,5 @@
+samples:
+  - ecoli_k12
+
+bowtie2:
+  threads: 4

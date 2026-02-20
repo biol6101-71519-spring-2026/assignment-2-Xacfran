@@ -1,1 +1,105 @@
-c
+configfile: 'config/config.yaml'
+
+# Workflow to:
+# FastQC on raw FASTQs
+# MultiQC to aggregate FastQC reports
+# Build index with bowtie2-build
+# Map with bowtie2
+# Sort + index with samtools
+# Flagstat with samtools
+
+
+# Declare all final outputs in the workflow
+rule all:
+    input:
+        expand('results/qc/fastqc/{sample}_{read}_fastqc.html', sample=config['samples'], read=['R1', 'R2']),
+        # Zip, otherwise multiqc fails to find the FastQC outputs
+        expand('results/qc/fastqc/{sample}_{read}_fastqc.zip', sample=config['samples'], read=['R1', 'R2']),
+        'results/qc/multiqc_report.html',
+        expand('results/mapped/{sample}.sorted.bam', sample=config['samples']),
+        expand('results/mapped/{sample}.sorted.bam.bai', sample=config['samples']),
+        expand('results/stats/{sample}.flagstat.txt', sample=config['samples'])
+
+# Define rules for each step of the workflow
+# quality control for both reads of ecoli
+
+rule fastqc:
+    input:
+        fastq='data/fastq/{sample}_{read}.fastq.gz'
+    output:
+        html='results/qc/fastqc/{sample}_{read}_fastqc.html',
+        zip= 'results/qc/fastqc/{sample}_{read}_fastqc.zip'
+    log:
+        'results/logs/fastqc/{sample}_{read}.log'
+    shell:
+        'fastqc {input.fastq} --outdir results/qc/fastqc/ > {log} 2>&1'
+
+# to summarize fastqc reports in one
+rule multiqc:
+    input:
+        expand(
+            'results/qc/fastqc/{sample}_{read}_fastqc.zip',
+            sample=config['samples'],
+            read=['R1', 'R2']
+        )
+    output:
+        'results/qc/multiqc_report.html'
+    log:
+        'results/logs/multiqc/multiqc.log'
+    shell:
+        'multiqc results/qc/fastqc/ --outdir results/qc/ > {log} 2>&1'
+
+# Indexes reference assembly
+rule bowtie2_index:
+    input:
+        ref='data/reference/ecoli_K12.fa'
+    output:
+        'results/mapped/index/ecoli_K12.1.bt2'
+    params:
+        assembly='results/mapped/index/ecoli_K12'
+    log:
+        'results/logs/bowtie2_index/ecoli_K12.log'
+    shell:
+        'bowtie2-build {input.ref} {params.assembly} > {log} 2>&1'
+
+# Maps the R1 and R2 reads to the reference assembly
+# piping to do it in a single rule
+rule bowtie2_align:
+    input:
+        r1='data/fastq/{sample}_R1.fastq.gz',
+        r2='data/fastq/{sample}_R2.fastq.gz',
+        # need the index or I get Command 'set -euo pipefail;  (bowtie2 ..... > results/logs/bowtie2/ecoli_k12.log 2>&1' returned non-zero exit status 1.
+        index='results/mapped/index/ecoli_K12.1.bt2'
+    output:
+        bam='results/mapped/{sample}.sorted.bam'
+    params:
+        index_assembly='results/mapped/index/ecoli_K12'
+    threads:
+        config['bowtie2']['threads']
+    log:
+        'results/logs/bowtie2/{sample}.log'
+    shell:
+        # the `-` after the `-o` passes the bowtie2 result to the next command
+        '(bowtie2 -x {params.index_assembly} -1 {input.r1} -2 {input.r2} -p {threads} | samtools view -bS - | samtools sort -o {output.bam} - ) > {log} 2>&1'
+
+# Creates the BAM index file from the bam file created previously
+rule samtools_index:
+    input:
+        bam='results/mapped/{sample}.sorted.bam'
+    output:
+        bai='results/mapped/{sample}.sorted.bam.bai'
+    log:
+        'results/logs/samtools_index/{sample}.log'
+    shell:
+        'samtools index {input.bam} > {log} 2>&1'
+
+# Alignment statistics
+rule samtools_flagstat:
+    input:
+        bam='results/mapped/{sample}.sorted.bam'
+    output:
+        stats='results/stats/{sample}.flagstat.txt'
+    log:
+        'results/logs/samtools_flagstat/{sample}.log'
+    shell:
+        'samtools flagstat {input.bam} > {output.stats} 2> {log}'
